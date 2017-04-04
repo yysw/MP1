@@ -96,8 +96,8 @@ int MP1Node::initThisNode(Address *joinaddr) {
 	/*
 	 * This function is partially implemented and may require changes
 	 */
-	int id = *(int*)(&memberNode->addr.addr);
-	int port = *(short*)(&memberNode->addr.addr[4]);
+//	int id = *(int*)(&memberNode->addr.addr);
+//	int port = *(short*)(&memberNode->addr.addr[4]);
 
 	memberNode->bFailed = false;
 	memberNode->inited = true;
@@ -112,47 +112,6 @@ int MP1Node::initThisNode(Address *joinaddr) {
     return 0;
 }
 
-/**
- * FUNCTION NAME: introduceSelfToGroup
- *
- * DESCRIPTION: Join the distributed system
- */
-int MP1Node::introduceSelfToGroup(Address *joinaddr) {
-	MessageHdr *msg;
-#ifdef DEBUGLOG
-    static char s[1024];
-#endif
-
-    if ( 0 == memcmp((char *)&(memberNode->addr.addr), (char *)&(joinaddr->addr), sizeof(memberNode->addr.addr))) {
-        // I am the group booter (first process to join the group). Boot up the group
-#ifdef DEBUGLOG
-        log->LOG(&memberNode->addr, "Starting up group...");
-#endif
-        memberNode->inGroup = true;
-    }
-    else {
-        size_t msgsize = sizeof(MessageHdr) + sizeof(joinaddr->addr) + sizeof(long) + 1;
-        msg = (MessageHdr *) malloc(msgsize * sizeof(char));
-
-        // create JOINREQ message: format of data is {struct Address myaddr}
-        msg->msgType = JOINREQ;
-        memcpy((char *)(msg+1), &memberNode->addr.addr, sizeof(memberNode->addr.addr));
-        memcpy((char *)(msg+1) + 1 + sizeof(memberNode->addr.addr), &memberNode->heartbeat, sizeof(long));
-
-#ifdef DEBUGLOG
-        sprintf(s, "Trying to join...");
-        log->LOG(&memberNode->addr, s);
-#endif
-
-        // send JOINREQ message to introducer member
-        emulNet->ENsend(&memberNode->addr, joinaddr, (char *)msg, msgsize);
-
-        free(msg);
-    }
-
-    return 1;
-
-}
 
 /**
  * FUNCTION NAME: finishUpThisNode
@@ -160,9 +119,23 @@ int MP1Node::introduceSelfToGroup(Address *joinaddr) {
  * DESCRIPTION: Wind up this node and clean up state
  */
 int MP1Node::finishUpThisNode(){
-   /*
-    * Your code goes here
-    */
+    /*
+     * Your code goes here
+     */
+//    int id = *(int*)(&memberNode->addr.addr);
+//    int port = *(short*)(&memberNode->addr.addr[4]);
+
+    memberNode->bFailed = false;
+    memberNode->inited = false;
+    memberNode->inGroup = false;
+    // node is up!
+    memberNode->nnb = 0;
+    memberNode->heartbeat = 0;
+    memberNode->pingCounter = TFAIL;
+    memberNode->timeOutCounter = -1;
+    memberNode->memberList.clear();
+
+    return 0;
 }
 
 /**
@@ -173,21 +146,35 @@ int MP1Node::finishUpThisNode(){
  */
 void MP1Node::nodeLoop() {
     if (memberNode->bFailed) {
-    	return;
+        return;
     }
 
     // Check my messages
     checkMessages();
+//    printMemberList();
 
     // Wait until you're in the group...
     if( !memberNode->inGroup ) {
-    	return;
+        return;
     }
 
     // ...then jump in and share your responsibilites!
     nodeLoopOps();
 
+
     return;
+}
+
+/*
+ * for debug
+ */
+void MP1Node::printMemberList() {
+    cout << "Member List Table for Node #:" << memberNode->addr.getAddress() << endl;
+    for (auto &item : memberNode->memberList) {
+        cout << "id:" << item.id << " port:" << item.port << " heartbeat:"
+             << item.heartbeat << " timestamp:" << item.timestamp << endl;
+    }
+    cout << endl;
 }
 
 /**
@@ -201,12 +188,252 @@ void MP1Node::checkMessages() {
 
     // Pop waiting messages from memberNode's mp1q
     while ( !memberNode->mp1q.empty() ) {
-    	ptr = memberNode->mp1q.front().elt;
-    	size = memberNode->mp1q.front().size;
-    	memberNode->mp1q.pop();
-    	recvCallBack((void *)memberNode, (char *)ptr, size);
+        ptr = memberNode->mp1q.front().elt;
+        size = memberNode->mp1q.front().size;
+        memberNode->mp1q.pop();
+        recvCallBack((void *)memberNode, (char *)ptr, size);
     }
     return;
+}
+
+void MP1Node::doHeartbeat(){
+    this->memberNode->heartbeat++;
+    for (auto &entry : memberNode->memberList) {
+        if((entry.id) == int(this->memberNode->addr.addr[0])) {
+            entry.setheartbeat(memberNode->heartbeat);
+            entry.settimestamp(this->par->getcurrtime());
+            break;
+        }
+    }
+}
+
+void MP1Node::combineMemberList(vector<MemberListEntry> &remoteMemberList) {
+    bool found;
+    for (auto &remote : remoteMemberList) {
+        found = false;
+        for (auto &local : this->memberNode->memberList) {
+            if (local.id == remote.id) {
+                found = true;
+                if (local.heartbeat < remote.heartbeat) {
+                    local.setheartbeat(remote.heartbeat);
+                    local.settimestamp(this->par->getcurrtime());
+                }
+                break;
+            }
+        }
+        // there's new member entry in the remote list
+        if(!found) {
+            MemberListEntry newEntry = MemberListEntry(remote);
+            this->memberNode->memberList.push_back(newEntry);
+            // log node join event
+            Address newAddr;
+            newAddr.init();
+            newAddr.addr[0] = remote.id;
+            newAddr.addr[4] = remote.port;
+            log->logNodeAdd(&memberNode->addr,&newAddr);
+        }
+    }
+}
+
+void MP1Node::removeFailedNode() {
+    vector<MemberListEntry>::iterator it;
+    MemberListEntry mle;
+    for (it = memberNode->memberList.begin(); it < memberNode->memberList.end(); it++) {
+        mle = *it;
+        if (mle.gettimestamp() < this->par->getcurrtime() - TREMOVE) {
+            memberNode->memberList.erase(it);
+            Address removedAddr;
+            removedAddr.init();
+            removedAddr.addr[0] = mle.id;
+            removedAddr.addr[4] = mle.port;
+            log->logNodeRemove(&memberNode->addr,&removedAddr);
+        }
+    }
+}
+
+/*
+ * pack member list into a char* buffer, structure as below:
+ * listsize: int, id: int, port: short, heartbeat: long, timestamp: long
+ */
+void MP1Node::packMemberListToMsg(char *msg) {
+    int listSize = memberNode->memberList.size();
+
+    // pack list size
+    memcpy(msg , &listSize, sizeof(int));
+    int offset = sizeof(int);
+
+    for (int i = 0; i < listSize; i++) {
+        // id
+        memcpy(msg + offset, &memberNode->memberList[i].id, sizeof(int));
+        offset += sizeof(int);
+
+        // port
+        memcpy(msg + offset, &memberNode->memberList[i].port, sizeof(short));
+        offset += sizeof(short);
+
+        // heartbeat
+        memcpy(msg + offset, &memberNode->memberList[i].heartbeat, sizeof(long));
+        offset += sizeof(long);
+
+
+        // timestamp
+        memcpy(msg + offset, &memberNode->memberList[i].timestamp, sizeof(long));
+        offset += sizeof(long);
+    }
+}
+
+/*
+ * uppack data from buffer, construct member list entry based on the data,
+ * and then add to a vector
+ */
+void MP1Node::unpackMemberListFromMsg(char *msg, vector<MemberListEntry> &remoteMemberList) {
+    int listSize, id;
+    short port;
+    long heartbeat, timestamp;
+
+    // unpack listSize
+    memcpy(&listSize, msg, sizeof(int));
+    int offset = sizeof(int);
+
+    for (int i = 0; i < listSize; i++) {
+        // id
+        memcpy(&id, msg + offset, sizeof(int));
+        offset += sizeof(int);
+
+        // port
+        memcpy(&port, msg + offset, sizeof(short));
+        offset += sizeof(short);
+
+        // heartbeat
+        memcpy(&heartbeat, msg + offset, sizeof(long));
+        offset += sizeof(long);
+
+        // timestamp
+        memcpy(&timestamp,msg + offset, sizeof(long));
+        offset += sizeof(long);
+
+        MemberListEntry mle = MemberListEntry(id, port, heartbeat, timestamp);
+        remoteMemberList.push_back(mle);
+    }
+}
+
+void MP1Node::sendJoinRequestMsg(Address *addr) {
+    size_t msgsize = sizeof(MessageHdr) + (sizeof(memberNode->addr.addr) + 1) + sizeof(long);
+    MessageHdr *msg = (MessageHdr *) malloc(msgsize * sizeof(char));
+
+    // Msg header
+    msg->msgType = JOINREQ;
+    // address
+    memcpy((char *)(msg+1), &memberNode->addr.addr, sizeof(memberNode->addr.addr));
+    // heartbeat
+    memcpy((char *)(msg+1) + sizeof(memberNode->addr.addr) + 1, &memberNode->heartbeat, sizeof(long));
+
+    emulNet->ENsend(&memberNode->addr, addr, (char *)msg, msgsize);
+    free(msg);
+}
+
+void MP1Node::sendJoinResponseMsg(Address *desAddr) {
+    int listSize = memberNode->memberList.size();
+    // the sender must be the starter node
+//    assert(memberNode->addr == getJoinAddress());
+
+    size_t memberListEntrySize = sizeof(int) + sizeof(short) + sizeof(long) + sizeof(long);
+    size_t msgsize = sizeof(MessageHdr) + (sizeof(memberNode->addr.addr) + 1) + sizeof(long) + sizeof(int) + listSize * memberListEntrySize;
+    MessageHdr *msg = (MessageHdr *) malloc(msgsize * sizeof(char));
+
+    // Msgheader
+    msg->msgType = JOINREP;
+    // Address
+    memcpy((char *)(msg+1), &memberNode->addr.addr, sizeof(memberNode->addr.addr));
+    int offset = sizeof(memberNode->addr.addr) + 1;
+    // Heartbeat
+    memcpy((char *)(msg+1) + offset, &memberNode->heartbeat, sizeof(long));
+    offset += sizeof(long);
+
+    packMemberListToMsg((char *)(msg+1) + offset);
+
+    // send JOINREP msg to the member that requst to join the group
+    /*
+    cout << "Sending message.  Msg type: " << msg->msgType << " My address: " << this->memberNode->addr.getAddress()
+         << " desAddress: " << desAddr->getAddress() << " heartbeat: " << memberNode->heartbeat
+         << " memberListSize:" << memberNode->memberList.size() << " Neighbour Count:" << this->memberNode->nnb
+         << " Time:" << this->par->getcurrtime() << endl;
+     */
+    emulNet->ENsend(&memberNode->addr, desAddr, (char *)msg, msgsize);
+    free(msg);
+}
+
+void MP1Node::sendGossipMsg() {
+    int listSize = memberNode->memberList.size();
+
+    size_t memberListEntrySize = sizeof(int) + sizeof(short) + sizeof(long) + sizeof(long);
+    size_t msgsize = sizeof(MessageHdr) + (sizeof(memberNode->addr.addr) + 1) + sizeof(long) + sizeof(int) + listSize * memberListEntrySize;
+    MessageHdr *msg = (MessageHdr *) malloc(msgsize * sizeof(char));
+
+    // Msgheader
+    msg->msgType = GOSSIP;
+    // Address
+    memcpy((char *)(msg+1), &memberNode->addr.addr, sizeof(memberNode->addr.addr));
+    int offset = sizeof(memberNode->addr.addr) + 1;
+    // Heartbeat
+    memcpy((char *)(msg+1) + offset, &memberNode->heartbeat, sizeof(long));
+    offset += sizeof(long);
+
+    packMemberListToMsg((char *)(msg+1) + offset);
+
+    // send message to all the members in the group except self
+    Address desAddress;
+    for (auto &mle : memberNode->memberList) {
+        desAddress.init();
+        desAddress.addr[0] = mle.id;
+        desAddress.addr[4] = mle.port;
+        if (!(memberNode->addr == desAddress)) {
+//            cout << "Sending message.  Msg type: " << msg->msgType << " My address: " << this->memberNode->addr.getAddress()
+//                 << " desAddress: " << desAddress.getAddress() << " heartbeat: " << memberNode->heartbeat
+//                 << " memberListSize:" << memberNode->memberList.size() << " Neighbour Count:" << this->memberNode->nnb
+//                 << " Time:" << this->par->getcurrtime() << endl;
+            emulNet->ENsend(&memberNode->addr, &desAddress, (char *)msg, msgsize);
+        }
+    }
+    free(msg);
+}
+/**
+ * FUNCTION NAME: introduceSelfToGroup
+ *
+ * DESCRIPTION: Join the distributed system
+ */
+int MP1Node::introduceSelfToGroup(Address *joinaddr) {
+//	MessageHdr *msg;
+#ifdef DEBUGLOG
+    static char s[1024];
+#endif
+
+    if ( 0 == memcmp((char *)&(memberNode->addr.addr), (char *)&(joinaddr->addr), sizeof(memberNode->addr.addr))) {
+        // I am the group booter (first process to join the group). Boot up the group
+#ifdef DEBUGLOG
+        log->LOG(&memberNode->addr, "Starting up group...");
+#endif
+        memberNode->inGroup = true;
+        MemberListEntry mle = MemberListEntry(int(memberNode->addr.addr[0]), short(memberNode->addr.addr[4]), memberNode->heartbeat, this->par->getcurrtime());
+        memberNode->memberList.push_back(mle);
+        // log node join event
+        Address newAddr;
+        newAddr.init();
+        newAddr.addr[0] = mle.id;
+        newAddr.addr[4] = mle.port;
+        log->logNodeAdd(&memberNode->addr,&newAddr);
+    }
+    else {
+#ifdef DEBUGLOG
+        sprintf(s, "Trying to join...");
+        log->LOG(&memberNode->addr, s);
+#endif
+
+        // send JOINREQ message to introducer member
+        sendJoinRequestMsg(joinaddr);
+    }
+    return 1;
+
 }
 
 /**
@@ -215,9 +442,64 @@ void MP1Node::checkMessages() {
  * DESCRIPTION: Message handler for different message types
  */
 bool MP1Node::recvCallBack(void *env, char *data, int size ) {
-	/*
-	 * Your code goes here
-	 */
+    // create JOINREP message: format of data is {type Address heartbeat}
+    MessageHdr *inMsg;
+    Address joinaddr, srcAddr;
+    long heartbeat;
+    vector<MemberListEntry> remoteMemberList;
+    joinaddr = getJoinAddress();
+
+    // unpack common field from data: srcAddress and heatbeat
+    int offset = 0;
+    inMsg = (MessageHdr *)data;
+    // Address
+    memcpy(&srcAddr.addr, data + sizeof(MessageHdr), sizeof(memberNode->addr.addr));
+    offset += sizeof(memberNode->addr.addr) + 1;
+    // heartbeat
+    memcpy(&heartbeat, (data+sizeof(MessageHdr)) + offset, sizeof(long));
+    offset += sizeof(long);
+
+//    cout << "Revieving message.  Msg type: " << inMsg->msgType << " My address: " << this->memberNode->addr.getAddress()
+//         << " srcAddress: " << srcAddr.getAddress() << " heartbeat: " << heartbeat
+//         << " memberListSize:" << memberNode->memberList.size() << " Neighbour Count:" << this->memberNode->nnb
+//         << " Time:" << this->par->getcurrtime() << endl;
+
+    if (inMsg->msgType == JOINREQ) {
+        // create JOINREP message: format of data is {msgHeader, myAddress, heartbeat, myMemberListTable}
+//        cout << "In starter node. Create and Sending JOINREP message..." << endl;
+        sendJoinResponseMsg(&srcAddr);
+        // log node join event
+
+        log->logNodeAdd(&memberNode->addr,&srcAddr);
+    } else if (inMsg->msgType == JOINREP) {
+        // join the group
+        memberNode->inGroup = true;
+        memberNode->inited = true;
+        // update local member entry list, add self in the list;
+        MemberListEntry mle = MemberListEntry(int(memberNode->addr.addr[0]), short(memberNode->addr.addr[4]),
+                                              memberNode->heartbeat, this->par->getcurrtime());
+        memberNode->memberList.push_back(mle);
+
+
+        // unpack the remote member list table
+        unpackMemberListFromMsg(data + sizeof(MessageHdr) + offset, remoteMemberList);
+//        cout << "Recieved JOINREP message..." << " remote memberList size: " << remoteMemberList.size() << endl;
+
+        // combine local and remote member list; update neighbor number;
+        combineMemberList(remoteMemberList);
+        memberNode->nnb = memberNode->memberList.size() - 1;
+        // Todo: set my pos in the member list
+//        memberNode->myPos = std::find(memberNode->memberList.begin(), memberNode->memberList.end(), mle);
+    } else if (inMsg->msgType == GOSSIP) {
+        // unpack the remote member list table
+        unpackMemberListFromMsg(data + sizeof(MessageHdr) + offset, remoteMemberList);
+//        cout << "Recieved GOSSIP message..." << " remote memberList size: " << remoteMemberList.size() << endl;
+
+        // combine local and remote member list; update neighbor number;
+        combineMemberList(remoteMemberList);
+        memberNode->nnb = memberNode->memberList.size() - 1;
+    }
+    return true;
 }
 
 /**
@@ -232,7 +514,9 @@ void MP1Node::nodeLoopOps() {
 	/*
 	 * Your code goes here
 	 */
-
+    doHeartbeat();
+    removeFailedNode();
+    sendGossipMsg();
     return;
 }
 

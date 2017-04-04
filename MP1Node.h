@@ -31,7 +31,7 @@
 enum MsgTypes{
     JOINREQ,
     JOINREP,
-    DUMMYLASTMSGTYPE
+    GOSSIP
 };
 
 /**
@@ -75,7 +75,20 @@ public:
 	Address getJoinAddress();
 	void initMemberListTable(Member *memberNode);
 	void printAddress(Address *addr);
-	virtual ~MP1Node();
+    void doHeartbeat();
+    void combineMemberList(vector<MemberListEntry> &remoteMemberList);
+    void removeFailedNode();
+    void upateLocalMemberListTable();
+    void sendJoinRequestMsg(Address *addr);
+    void sendJoinResponseMsg(Address *desAddr);
+    void sendGossipMsg();
+    void packMemberListToMsg(char *msg);
+    void unpackMemberListFromMsg(char *msg, vector<MemberListEntry> &remoteMemberList);
+    void printMemberList();
+
+
+
+    virtual ~MP1Node();
 };
 
 #endif /* _MP1NODE_H_ */
